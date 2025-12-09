@@ -1353,14 +1353,19 @@ class T5GemmaLoader(ModelLoader):
             decoder_config, "hidden_activation", "gelu_pytorch_tanh"
         )
 
-        # Get RoPE parameters
-        rope_theta = getattr(decoder_config, "rope_theta", 10000)
-        sliding_window = getattr(decoder_config, "sliding_window", 4096)
-        layer_types = getattr(decoder_config, "layer_types", None)
+        # Get RoPE and sliding window parameters separately for encoder and decoder
+        encoder_rope_theta = getattr(encoder_config, "rope_theta", 10000)
+        encoder_sliding_window = getattr(encoder_config, "sliding_window", 4096)
+        encoder_layer_types = getattr(encoder_config, "layer_types", None)
+
+        decoder_rope_theta = getattr(decoder_config, "rope_theta", 10000)
+        decoder_sliding_window = getattr(decoder_config, "sliding_window", 4096)
+        decoder_layer_types = getattr(decoder_config, "layer_types", None)
 
         # Create encoder-decoder spec with Gemma2 features
         # Note: TransformerSpec.from_config uses the same num_heads for both encoder and decoder
-        # We use the encoder num_heads here as the primary configuration
+        # and doesn't support advanced GQA parameters (num_heads_kv, head_dim, etc.)
+        # We set these per-layer in set_encoder and set_decoder
         spec = transformer_spec.TransformerSpec.from_config(
             (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
             num_heads_enc,
@@ -1372,25 +1377,24 @@ class T5GemmaLoader(ModelLoader):
             ),
             ffn_glu=True,
             rms_norm=True,
-            # Note: rotary_dim, rotary_base, etc. are applied to both encoder and decoder
-            # We'll handle per-layer differences in set_encoder and set_decoder
         )
 
-        # Set encoder and decoder
+        # Set encoder and decoder with their respective configurations
         self.set_encoder(
             spec.encoder,
             model.encoder,
             encoder_config,
-            num_heads_kv_enc,
-            layer_types,
+            encoder_rope_theta,
+            encoder_sliding_window,
+            encoder_layer_types,
         )
         self.set_decoder(
             spec.decoder,
             model.decoder,
             decoder_config,
-            num_heads_dec,
-            num_heads_kv_dec,
-            layer_types,
+            decoder_rope_theta,
+            decoder_sliding_window,
+            decoder_layer_types,
         )
         self.set_linear(spec.decoder.projection, model.lm_head)
 
@@ -1435,15 +1439,15 @@ class T5GemmaLoader(ModelLoader):
         spec.gamma = layer_norm.weight
         spec.layer_norm_use_residual = True
 
-    def set_encoder(self, spec, encoder, encoder_config, num_heads_kv_enc, layer_types):
+    def set_encoder(
+        self, spec, encoder, encoder_config, rope_theta, sliding_window, layer_types
+    ):
         spec.scale_embeddings = True
         spec.start_from_zero_embedding = False
         self.set_embeddings(spec.embeddings, encoder.embed_tokens)
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
-        # Get RoPE parameters for encoder
-        rope_theta = getattr(encoder_config, "rope_theta", 10000)
-        sliding_window = getattr(encoder_config, "sliding_window", 4096)
+        # Get head dimension for encoder
         head_dim = getattr(encoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
@@ -1471,6 +1475,7 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[1].weight = wo
 
             # Set per-layer RoPE and attention parameters
+            # GQA, head_dim, and RoPE are handled at the layer level for encoder-decoder models
             layer_spec.self_attention.rotary_dim = np.dtype("int32").type(head_dim)
             layer_spec.self_attention.rotary_interleave = False
             layer_spec.self_attention.rotary_base = np.dtype("float32").type(rope_theta)
@@ -1494,16 +1499,14 @@ class T5GemmaLoader(ModelLoader):
             gc.collect()
 
     def set_decoder(
-        self, spec, decoder, decoder_config, num_heads_dec, num_heads_kv_dec, layer_types
+        self, spec, decoder, decoder_config, rope_theta, sliding_window, layer_types
     ):
         spec.scale_embeddings = True
         spec.start_from_zero_embedding = False
         self.set_embeddings(spec.embeddings, decoder.embed_tokens)
         self.set_layer_norm(spec.layer_norm, decoder.norm)
 
-        # Get RoPE parameters for decoder
-        rope_theta = getattr(decoder_config, "rope_theta", 10000)
-        sliding_window = getattr(decoder_config, "sliding_window", 4096)
+        # Get head dimension for decoder
         head_dim = getattr(decoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
