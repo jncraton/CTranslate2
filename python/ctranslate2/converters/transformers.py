@@ -1380,9 +1380,10 @@ class T5GemmaLoader(ModelLoader):
         )
 
         # Set encoder and decoder with their respective configurations
+        # Note: T5Gemma has encoder/decoder under model.model, not directly under model
         self.set_encoder(
             spec.encoder,
-            model.encoder,
+            model.model.encoder,
             encoder_config,
             encoder_rope_theta,
             encoder_sliding_window,
@@ -1390,21 +1391,24 @@ class T5GemmaLoader(ModelLoader):
         )
         self.set_decoder(
             spec.decoder,
-            model.decoder,
+            model.model.decoder,
             decoder_config,
             decoder_rope_theta,
             decoder_sliding_window,
             decoder_layer_types,
         )
-        self.set_linear(spec.decoder.projection, model.lm_head)
+        # lm_head in T5Gemma has an out_proj wrapper (T5GemmaLMHead)
+        lm_head = model.lm_head
+        if hasattr(lm_head, 'out_proj'):
+            lm_head = lm_head.out_proj
+        self.set_linear(spec.decoder.projection, lm_head)
 
         # Handle embedding scaling
-        spec.decoder.embeddings.multiply_by_sqrt_depth = (
-            decoder_config.hidden_size ** 0.5
-        )
-        spec.encoder.embeddings.multiply_by_sqrt_depth = (
-            encoder_config.hidden_size ** 0.5
-        )
+        decoder_emb = spec.decoder.embeddings[0] if isinstance(spec.decoder.embeddings, list) else spec.decoder.embeddings
+        encoder_emb = spec.encoder.embeddings[0] if isinstance(spec.encoder.embeddings, list) else spec.encoder.embeddings
+        
+        decoder_emb.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
+        encoder_emb.multiply_by_sqrt_depth = encoder_config.hidden_size ** 0.5
 
         return spec
 
@@ -1428,7 +1432,7 @@ class T5GemmaLoader(ModelLoader):
         config.eos_token = tokenizer.eos_token
         config.unk_token = tokenizer.unk_token
         config.layer_norm_epsilon = model.config.decoder.rms_norm_eps
-        if hasattr(model.config, "decoder_start_token_id"):
+        if hasattr(model.config, "decoder_start_token_id") and model.config.decoder_start_token_id is not None:
             config.decoder_start_token = tokenizer.convert_ids_to_tokens(
                 model.config.decoder_start_token_id
             )
@@ -1443,28 +1447,19 @@ class T5GemmaLoader(ModelLoader):
         self, spec, encoder, encoder_config, rope_theta, sliding_window, layer_types
     ):
         spec.scale_embeddings = True
-        spec.start_from_zero_embedding = False
-        self.set_embeddings(spec.embeddings, encoder.embed_tokens)
+        self.set_embeddings(
+            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
+            encoder.embed_tokens
+        )
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
         # Get head dimension for encoder
         head_dim = getattr(encoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
-
-            self.set_layer_norm(
-                layer_spec.post_attention_layer_norm, layer.post_attention_layernorm
-            )
-
-            self.set_layer_norm(
-                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
-            )
-
-            self.set_layer_norm(
-                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
-            )
-
+            # Set attention layer norm - T5Gemma has pre_self_attn_layernorm
+            self.set_layer_norm(layer_spec.self_attention.layer_norm, layer.pre_self_attn_layernorm)
+            
             # Set attention weights
             wq = layer.self_attn.q_proj.weight
             wk = layer.self_attn.k_proj.weight
@@ -1474,21 +1469,9 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set per-layer RoPE and attention parameters
-            # GQA, head_dim, and RoPE are handled at the layer level for encoder-decoder models
-            layer_spec.self_attention.rotary_dim = np.dtype("int32").type(head_dim)
-            layer_spec.self_attention.rotary_interleave = False
-            layer_spec.self_attention.rotary_base = np.dtype("float32").type(rope_theta)
-
-            # Handle sliding window attention if layer_types is specified
-            if layer_types and i < len(layer_types):
-                if layer_types[i] == "full_attention":
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
-                elif layer_types[i] == "sliding_attention":
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
-                        sliding_window
-                    )
-
+            # Set FFN layer norm - T5Gemma has pre_feedforward_layernorm
+            self.set_layer_norm(layer_spec.ffn.layer_norm, layer.pre_feedforward_layernorm)
+            
             # Set FFN weights
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
@@ -1502,28 +1485,19 @@ class T5GemmaLoader(ModelLoader):
         self, spec, decoder, decoder_config, rope_theta, sliding_window, layer_types
     ):
         spec.scale_embeddings = True
-        spec.start_from_zero_embedding = False
-        self.set_embeddings(spec.embeddings, decoder.embed_tokens)
+        self.set_embeddings(
+            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
+            decoder.embed_tokens
+        )
         self.set_layer_norm(spec.layer_norm, decoder.norm)
 
         # Get head dimension for decoder
         head_dim = getattr(decoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
-
-            self.set_layer_norm(
-                layer_spec.post_attention_layer_norm, layer.post_attention_layernorm
-            )
-
-            self.set_layer_norm(
-                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
-            )
-
-            self.set_layer_norm(
-                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
-            )
-
+            # Set self-attention layer norm - T5Gemma has pre_self_attn_layernorm
+            self.set_layer_norm(layer_spec.self_attention.layer_norm, layer.pre_self_attn_layernorm)
+            
             # Set self-attention weights
             wq = layer.self_attn.q_proj.weight
             wk = layer.self_attn.k_proj.weight
@@ -1533,20 +1507,9 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set per-layer RoPE and attention parameters for self-attention
-            layer_spec.self_attention.rotary_dim = np.dtype("int32").type(head_dim)
-            layer_spec.self_attention.rotary_interleave = False
-            layer_spec.self_attention.rotary_base = np.dtype("float32").type(rope_theta)
-
-            # Handle sliding window attention if layer_types is specified
-            if layer_types and i < len(layer_types):
-                if layer_types[i] == "full_attention":
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
-                elif layer_types[i] == "sliding_attention":
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
-                        sliding_window
-                    )
-
+            # Set cross-attention layer norm - T5Gemma has pre_cross_attn_layernorm
+            self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
+            
             # Set cross-attention weights
             wq_cross = layer.cross_attn.q_proj.weight
             wk_cross = layer.cross_attn.k_proj.weight
@@ -1557,6 +1520,9 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.attention.linear[1].weight = torch.cat([wk_cross, wv_cross])
             layer_spec.attention.linear[2].weight = wo_cross
 
+            # Set FFN layer norm - T5Gemma has pre_feedforward_layernorm
+            self.set_layer_norm(layer_spec.ffn.layer_norm, layer.pre_feedforward_layernorm)
+            
             # Set FFN weights
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
