@@ -159,8 +159,48 @@ If you get `KeyError: 'T5GemmaConfig'`:
 
 ### Model Download Issues
 If you have network issues downloading models:
-- Download the model manually: `git clone https://huggingface.co/harshaljanjani/tiny-t5gemma-test`
-- Use the local path in the converter: `TransformersConverter("path/to/tiny-t5gemma-test")`
+
+**Option 1: Manual download with git-lfs**
+```bash
+# Install git-lfs if not already installed
+git lfs install
+
+# Clone the repository
+git clone https://huggingface.co/harshaljanjani/tiny-t5gemma-test
+
+# If clone fails, try pulling LFS files separately
+cd tiny-t5gemma-test
+git lfs pull
+
+# Use the local path
+python -c "
+import ctranslate2
+converter = ctranslate2.converters.TransformersConverter('./tiny-t5gemma-test')
+converter.convert('ct2_model')
+"
+```
+
+**Option 2: Use huggingface-cli with caching**
+```bash
+# Download with retry logic
+huggingface-cli download harshaljanjani/tiny-t5gemma-test --local-dir ./tiny-t5gemma-test
+
+# Convert from local directory
+python -c "
+import ctranslate2
+converter = ctranslate2.converters.TransformersConverter('./tiny-t5gemma-test')
+converter.convert('ct2_model')
+"
+```
+
+**Option 3: Download during stable network hours**
+- HuggingFace may have temporary connectivity issues
+- Retry during off-peak hours (typically late night UTC)
+- Use a stable, high-bandwidth connection
+
+**Option 4: Use smaller test models first**
+- Test with smaller T5 models to verify setup
+- Then graduate to T5Gemma models once connectivity is stable
 
 ## Performance Expectations
 
