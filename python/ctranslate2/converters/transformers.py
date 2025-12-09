@@ -1325,6 +1325,231 @@ class MT5Loader(T5Loader):
         return "MT5ForConditionalGeneration"
 
 
+@register_loader("T5GemmaConfig")
+class T5GemmaLoader(ModelLoader):
+    @property
+    def architecture_name(self):
+        return "T5GemmaForConditionalGeneration"
+
+    def get_model_spec(self, model):
+        # Get encoder and decoder configs
+        encoder_config = model.config.encoder
+        decoder_config = model.config.decoder
+
+        # Extract attention head configuration for encoder
+        num_heads_enc = encoder_config.num_attention_heads
+        num_heads_kv_enc = getattr(encoder_config, "num_key_value_heads", num_heads_enc)
+        if num_heads_kv_enc == num_heads_enc:
+            num_heads_kv_enc = None
+
+        # Extract attention head configuration for decoder
+        num_heads_dec = decoder_config.num_attention_heads
+        num_heads_kv_dec = getattr(decoder_config, "num_key_value_heads", num_heads_dec)
+        if num_heads_kv_dec == num_heads_dec:
+            num_heads_kv_dec = None
+
+        # Get activation function
+        activation_config = getattr(
+            decoder_config, "hidden_activation", "gelu_pytorch_tanh"
+        )
+
+        # Get RoPE parameters
+        rope_theta = getattr(decoder_config, "rope_theta", 10000)
+        sliding_window = getattr(decoder_config, "sliding_window", 4096)
+        layer_types = getattr(decoder_config, "layer_types", None)
+
+        # Create encoder-decoder spec with Gemma2 features
+        spec = transformer_spec.TransformerSpec.from_config(
+            (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
+            num_heads_enc,
+            pre_norm=True,
+            activation=(
+                common_spec.Activation.GELU
+                if activation_config == "gelu"
+                else common_spec.Activation.GELUTanh
+            ),
+            ffn_glu=True,
+            rms_norm=True,
+            rotary_dim=encoder_config.head_dim,
+            rotary_interleave=False,
+            rotary_base=rope_theta,
+            num_heads_kv=num_heads_kv_enc,
+            head_dim=encoder_config.head_dim,
+            pre_post_layer_norm=True,
+        )
+
+        # Set encoder and decoder
+        self.set_encoder(spec.encoder, model.encoder, encoder_config, layer_types)
+        self.set_decoder(
+            spec.decoder, model.decoder, decoder_config, num_heads_kv_dec, layer_types
+        )
+        self.set_linear(spec.decoder.projection, model.lm_head)
+
+        # Handle embedding scaling
+        spec.decoder.embeddings.multiply_by_sqrt_depth = (
+            decoder_config.hidden_size ** 0.5
+        )
+        spec.encoder.embeddings.multiply_by_sqrt_depth = (
+            encoder_config.hidden_size ** 0.5
+        )
+
+        return spec
+
+    def get_vocabulary(self, model, tokenizer):
+        tokens = super().get_vocabulary(model, tokenizer)
+
+        extra_ids = model.config.vocab_size - len(tokens)
+        for i in range(extra_ids):
+            tokens.append("<extra_id_%d>" % i)
+        if model.config.vocab_size < len(tokens):
+            tokens = tokens[: model.config.vocab_size]
+
+        return tokens
+
+    def set_vocabulary(self, spec, tokens):
+        spec.register_source_vocabulary(tokens)
+        spec.register_target_vocabulary(tokens)
+
+    def set_config(self, config, model, tokenizer):
+        config.bos_token = tokenizer.bos_token
+        config.eos_token = tokenizer.eos_token
+        config.unk_token = tokenizer.unk_token
+        config.layer_norm_epsilon = model.config.decoder.rms_norm_eps
+        if hasattr(model.config, "decoder_start_token_id"):
+            config.decoder_start_token = tokenizer.convert_ids_to_tokens(
+                model.config.decoder_start_token_id
+            )
+        else:
+            config.decoder_start_token = tokenizer.bos_token
+
+    def set_layer_norm(self, spec, layer_norm):
+        spec.gamma = layer_norm.weight
+        spec.layer_norm_use_residual = True
+
+    def set_encoder(self, spec, encoder, encoder_config, layer_types):
+        spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False
+        self.set_embeddings(spec.embeddings, encoder.embed_tokens)
+        self.set_layer_norm(spec.layer_norm, encoder.norm)
+
+        # Get RoPE parameters for encoder
+        rope_theta = getattr(encoder_config, "rope_theta", 10000)
+        sliding_window = getattr(encoder_config, "sliding_window", 4096)
+
+        for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
+
+            self.set_layer_norm(
+                layer_spec.post_attention_layer_norm, layer.post_attention_layernorm
+            )
+
+            self.set_layer_norm(
+                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
+            )
+
+            self.set_layer_norm(
+                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
+            )
+
+            # Set attention weights
+            wq = layer.self_attn.q_proj.weight
+            wk = layer.self_attn.k_proj.weight
+            wv = layer.self_attn.v_proj.weight
+            wo = layer.self_attn.o_proj.weight
+
+            layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
+            layer_spec.self_attention.linear[1].weight = wo
+
+            # Set FFN weights
+            self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
+            self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
+            self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+
+            # Handle sliding window attention if layer_types is specified
+            if layer_types and i < len(layer_types):
+                if layer_types[i] == "full_attention":
+                    layer_spec.self_attention.rotary_base = np.dtype("float32").type(
+                        rope_theta
+                    )
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
+                elif layer_types[i] == "sliding_attention":
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
+                        sliding_window
+                    )
+
+            delattr(layer, "self_attn")
+            delattr(layer, "mlp")
+            gc.collect()
+
+    def set_decoder(
+        self, spec, decoder, decoder_config, num_heads_kv_dec, layer_types
+    ):
+        spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False
+        self.set_embeddings(spec.embeddings, decoder.embed_tokens)
+        self.set_layer_norm(spec.layer_norm, decoder.norm)
+
+        # Get RoPE parameters for decoder
+        rope_theta = getattr(decoder_config, "rope_theta", 10000)
+        sliding_window = getattr(decoder_config, "sliding_window", 4096)
+
+        for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
+
+            self.set_layer_norm(
+                layer_spec.post_attention_layer_norm, layer.post_attention_layernorm
+            )
+
+            self.set_layer_norm(
+                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
+            )
+
+            self.set_layer_norm(
+                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
+            )
+
+            # Set self-attention weights
+            wq = layer.self_attn.q_proj.weight
+            wk = layer.self_attn.k_proj.weight
+            wv = layer.self_attn.v_proj.weight
+            wo = layer.self_attn.o_proj.weight
+
+            layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
+            layer_spec.self_attention.linear[1].weight = wo
+
+            # Set cross-attention weights
+            wq_cross = layer.cross_attn.q_proj.weight
+            wk_cross = layer.cross_attn.k_proj.weight
+            wv_cross = layer.cross_attn.v_proj.weight
+            wo_cross = layer.cross_attn.o_proj.weight
+
+            layer_spec.attention.linear[0].weight = wq_cross
+            layer_spec.attention.linear[1].weight = torch.cat([wk_cross, wv_cross])
+            layer_spec.attention.linear[2].weight = wo_cross
+
+            # Set FFN weights
+            self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
+            self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
+            self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+
+            # Handle sliding window attention if layer_types is specified
+            if layer_types and i < len(layer_types):
+                if layer_types[i] == "full_attention":
+                    layer_spec.self_attention.rotary_base = np.dtype("float32").type(
+                        rope_theta
+                    )
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
+                elif layer_types[i] == "sliding_attention":
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
+                        sliding_window
+                    )
+
+            delattr(layer, "self_attn")
+            delattr(layer, "cross_attn")
+            delattr(layer, "mlp")
+            gc.collect()
+
+
 @register_loader("BloomConfig")
 class BloomLoader(ModelLoader):
     @property
