@@ -1359,6 +1359,8 @@ class T5GemmaLoader(ModelLoader):
         layer_types = getattr(decoder_config, "layer_types", None)
 
         # Create encoder-decoder spec with Gemma2 features
+        # Note: TransformerSpec.from_config uses the same num_heads for both encoder and decoder
+        # We use the encoder num_heads here as the primary configuration
         spec = transformer_spec.TransformerSpec.from_config(
             (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
             num_heads_enc,
@@ -1370,18 +1372,25 @@ class T5GemmaLoader(ModelLoader):
             ),
             ffn_glu=True,
             rms_norm=True,
-            rotary_dim=encoder_config.head_dim,
-            rotary_interleave=False,
-            rotary_base=rope_theta,
-            num_heads_kv=num_heads_kv_enc,
-            head_dim=encoder_config.head_dim,
-            pre_post_layer_norm=True,
+            # Note: rotary_dim, rotary_base, etc. are applied to both encoder and decoder
+            # We'll handle per-layer differences in set_encoder and set_decoder
         )
 
         # Set encoder and decoder
-        self.set_encoder(spec.encoder, model.encoder, encoder_config, layer_types)
+        self.set_encoder(
+            spec.encoder,
+            model.encoder,
+            encoder_config,
+            num_heads_kv_enc,
+            layer_types,
+        )
         self.set_decoder(
-            spec.decoder, model.decoder, decoder_config, num_heads_kv_dec, layer_types
+            spec.decoder,
+            model.decoder,
+            decoder_config,
+            num_heads_dec,
+            num_heads_kv_dec,
+            layer_types,
         )
         self.set_linear(spec.decoder.projection, model.lm_head)
 
@@ -1426,7 +1435,7 @@ class T5GemmaLoader(ModelLoader):
         spec.gamma = layer_norm.weight
         spec.layer_norm_use_residual = True
 
-    def set_encoder(self, spec, encoder, encoder_config, layer_types):
+    def set_encoder(self, spec, encoder, encoder_config, num_heads_kv_enc, layer_types):
         spec.scale_embeddings = True
         spec.start_from_zero_embedding = False
         self.set_embeddings(spec.embeddings, encoder.embed_tokens)
@@ -1435,6 +1444,7 @@ class T5GemmaLoader(ModelLoader):
         # Get RoPE parameters for encoder
         rope_theta = getattr(encoder_config, "rope_theta", 10000)
         sliding_window = getattr(encoder_config, "sliding_window", 4096)
+        head_dim = getattr(encoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
             self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
@@ -1460,29 +1470,31 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set FFN weights
-            self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
-            self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
-            self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+            # Set per-layer RoPE and attention parameters
+            layer_spec.self_attention.rotary_dim = np.dtype("int32").type(head_dim)
+            layer_spec.self_attention.rotary_interleave = False
+            layer_spec.self_attention.rotary_base = np.dtype("float32").type(rope_theta)
 
             # Handle sliding window attention if layer_types is specified
             if layer_types and i < len(layer_types):
                 if layer_types[i] == "full_attention":
-                    layer_spec.self_attention.rotary_base = np.dtype("float32").type(
-                        rope_theta
-                    )
                     layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
                 elif layer_types[i] == "sliding_attention":
                     layer_spec.self_attention.sliding_window = np.dtype("int32").type(
                         sliding_window
                     )
 
+            # Set FFN weights
+            self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
+            self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
+            self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+
             delattr(layer, "self_attn")
             delattr(layer, "mlp")
             gc.collect()
 
     def set_decoder(
-        self, spec, decoder, decoder_config, num_heads_kv_dec, layer_types
+        self, spec, decoder, decoder_config, num_heads_dec, num_heads_kv_dec, layer_types
     ):
         spec.scale_embeddings = True
         spec.start_from_zero_embedding = False
@@ -1492,6 +1504,7 @@ class T5GemmaLoader(ModelLoader):
         # Get RoPE parameters for decoder
         rope_theta = getattr(decoder_config, "rope_theta", 10000)
         sliding_window = getattr(decoder_config, "sliding_window", 4096)
+        head_dim = getattr(decoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
             self.set_layer_norm(layer_spec.input_layer_norm, layer.input_layernorm)
@@ -1517,6 +1530,20 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
+            # Set per-layer RoPE and attention parameters for self-attention
+            layer_spec.self_attention.rotary_dim = np.dtype("int32").type(head_dim)
+            layer_spec.self_attention.rotary_interleave = False
+            layer_spec.self_attention.rotary_base = np.dtype("float32").type(rope_theta)
+
+            # Handle sliding window attention if layer_types is specified
+            if layer_types and i < len(layer_types):
+                if layer_types[i] == "full_attention":
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
+                elif layer_types[i] == "sliding_attention":
+                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
+                        sliding_window
+                    )
+
             # Set cross-attention weights
             wq_cross = layer.cross_attn.q_proj.weight
             wk_cross = layer.cross_attn.k_proj.weight
@@ -1531,18 +1558,6 @@ class T5GemmaLoader(ModelLoader):
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
             self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
-
-            # Handle sliding window attention if layer_types is specified
-            if layer_types and i < len(layer_types):
-                if layer_types[i] == "full_attention":
-                    layer_spec.self_attention.rotary_base = np.dtype("float32").type(
-                        rope_theta
-                    )
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(0)
-                elif layer_types[i] == "sliding_attention":
-                    layer_spec.self_attention.sliding_window = np.dtype("int32").type(
-                        sliding_window
-                    )
 
             delattr(layer, "self_attn")
             delattr(layer, "cross_attn")

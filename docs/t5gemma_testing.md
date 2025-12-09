@@ -17,6 +17,7 @@ You can test the T5Gemma support using the following Google Colab notebook templ
 
 ```python
 # Install CTranslate2 from the development branch
+# Note: Once merged, use: pip install ctranslate2
 !pip install git+https://github.com/jncraton/CTranslate2.git@copilot/support-t5gemma-architecture
 
 # Install transformers with T5Gemma support (requires recent version)
