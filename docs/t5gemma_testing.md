@@ -11,43 +11,57 @@ T5Gemma is a family of encoder-decoder large language models developed by Google
 - RMSNorm
 - Interleaved local/global attention
 
-## Quick Test with Google Colab
+## Quick Test with Google Colab (Recommended)
 
-You can test the T5Gemma support using the following Google Colab notebook template:
+The easiest way to test T5Gemma support is using the provided Colab notebook (`examples/t5gemma_colab.ipynb`):
+
+1. Open the notebook in Google Colab
+2. Run the installation cell (installs stable ctranslate2 from PyPI)
+3. Run the patch cell (downloads T5GemmaLoader)
+4. Follow the examples to convert and run inference
+
+The notebook uses a simple approach:
+- Installs stable `ctranslate2` from PyPI
+- Patches only the `transformers.py` file with T5Gemma support
+- No need to build from source
+
+## Local Testing
+
+### Prerequisites
+
+```bash
+# Install stable CTranslate2
+pip install ctranslate2
+
+# Install dependencies
+pip install 'transformers>=4.50.0' torch sentencepiece
+```
+
+### Apply T5Gemma Patch
 
 ```python
-# Install CTranslate2 from the development branch
-# Note: Once merged, use: pip install ctranslate2
-!pip install git+https://github.com/jncraton/CTranslate2.git@copilot/support-t5gemma-architecture
-
-# Install transformers with T5Gemma support (requires recent version)
-!pip install transformers>=4.50.0 torch
-
-# Convert a T5Gemma model
+import urllib.request
+import os
+import shutil
 import ctranslate2
+import importlib
 
-model_name = "harshaljanjani/tiny-t5gemma-test"
+# Get the ctranslate2 installation path
+ct2_path = os.path.dirname(ctranslate2.__file__)
+transformers_py_path = os.path.join(ct2_path, 'converters', 'transformers.py')
 
-converter = ctranslate2.converters.TransformersConverter(
-    model_name,
-    trust_remote_code=True
-)
+# Backup original file
+shutil.copy(transformers_py_path, transformers_py_path + '.backup')
 
-output_dir = converter.convert("ct2_t5gemma_model")
-print(f"Model converted successfully to: {output_dir}")
+# Download the patched version
+url = 'https://raw.githubusercontent.com/jncraton/CTranslate2/copilot/support-t5gemma-architecture/python/ctranslate2/converters/transformers.py'
+urllib.request.urlretrieve(url, transformers_py_path)
 
-# Test translation/generation
-translator = ctranslate2.Translator(output_dir)
-
-# Example: Translate English to German
-source = ["translate English to German: The house is wonderful."]
-results = translator.translate_batch(
-    [s.split() for s in source]
-)
-
-print("\nTranslation results:")
-for result in results:
-    print(" ".join(result.hypotheses[0]))
+# Reload the module
+import ctranslate2.converters.transformers
+importlib.reload(ctranslate2.converters.transformers)
+print("✓ T5Gemma support enabled")
+```
 ```
 
 ## Testing Locally
