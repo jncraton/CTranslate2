@@ -1403,13 +1403,6 @@ class T5GemmaLoader(ModelLoader):
             lm_head = lm_head.out_proj
         self.set_linear(spec.decoder.projection, lm_head)
 
-        # Handle embedding scaling
-        decoder_emb = spec.decoder.embeddings[0] if isinstance(spec.decoder.embeddings, list) else spec.decoder.embeddings
-        encoder_emb = spec.encoder.embeddings[0] if isinstance(spec.encoder.embeddings, list) else spec.encoder.embeddings
-        
-        decoder_emb.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
-        encoder_emb.multiply_by_sqrt_depth = encoder_config.hidden_size ** 0.5
-
         return spec
 
     def get_vocabulary(self, model, tokenizer):
