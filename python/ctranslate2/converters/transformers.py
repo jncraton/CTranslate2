@@ -1364,8 +1364,6 @@ class T5GemmaLoader(ModelLoader):
 
         # Create encoder-decoder spec with Gemma2 features
         # T5Gemma is based on Gemma2 architecture adapted for encoder-decoder
-        # Note: The PyPI version doesn't support pre_post_layer_norm for encoder-decoder
-        # but we can still set the layer norms correctly in set_encoder() and set_decoder()
         spec = transformer_spec.TransformerSpec.from_config(
             (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
             num_heads_enc,
@@ -1377,6 +1375,7 @@ class T5GemmaLoader(ModelLoader):
             ),
             ffn_glu=True,
             rms_norm=True,
+            pre_post_layer_norm=True,  # Enable Gemma2-style pre+post layer norms
         )
 
         # Set encoder and decoder following Gemma2 pattern
@@ -1437,11 +1436,11 @@ class T5GemmaLoader(ModelLoader):
         self, spec, encoder, encoder_config
     ):
         spec.scale_embeddings = True
-        spec.start_from_zero_embedding = False
-        self.set_embeddings(
-            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
-            encoder.embed_tokens
-        )
+        # Set Gemma2-style embedding scaling
+        embeddings = spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        self.set_embeddings(embeddings, encoder.embed_tokens)
+        embeddings.multiply_by_sqrt_depth = encoder_config.hidden_size ** 0.5
+        
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
@@ -1479,11 +1478,11 @@ class T5GemmaLoader(ModelLoader):
         self, spec, decoder, decoder_config
     ):
         spec.scale_embeddings = True
-        spec.start_from_zero_embedding = False
-        self.set_embeddings(
-            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
-            decoder.embed_tokens
-        )
+        # Set Gemma2-style embedding scaling
+        embeddings = spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        self.set_embeddings(embeddings, decoder.embed_tokens)
+        embeddings.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
+        
         self.set_layer_norm(spec.layer_norm, decoder.norm)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
