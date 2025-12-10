@@ -1363,9 +1363,9 @@ class T5GemmaLoader(ModelLoader):
         decoder_layer_types = getattr(decoder_config, "layer_types", None)
 
         # Create encoder-decoder spec with Gemma2 features
-        # Note: TransformerSpec.from_config uses the same num_heads for both encoder and decoder
-        # and doesn't support advanced GQA parameters (num_heads_kv, head_dim, etc.)
-        # We set these per-layer in set_encoder and set_decoder
+        # T5Gemma is based on Gemma2 architecture adapted for encoder-decoder
+        # Note: The PyPI version doesn't support pre_post_layer_norm for encoder-decoder
+        # but we can still set the layer norms correctly in set_encoder() and set_decoder()
         spec = transformer_spec.TransformerSpec.from_config(
             (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
             num_heads_enc,
@@ -1377,40 +1377,28 @@ class T5GemmaLoader(ModelLoader):
             ),
             ffn_glu=True,
             rms_norm=True,
-            pre_post_layer_norm=True,  # T5Gemma uses Gemma2-style pre+post layer norms
         )
 
-        # Set encoder and decoder with their respective configurations
-        # Note: T5Gemma has encoder/decoder under model.model, not directly under model
-        self.set_encoder(
-            spec.encoder,
-            model.model.encoder,
-            encoder_config,
-            encoder_rope_theta,
-            encoder_sliding_window,
-            encoder_layer_types,
-        )
-        self.set_decoder(
-            spec.decoder,
-            model.model.decoder,
-            decoder_config,
-            decoder_rope_theta,
-            decoder_sliding_window,
-            decoder_layer_types,
-        )
-        # lm_head in T5Gemma has an out_proj wrapper (T5GemmaLMHead)
-        # Handle tied word embeddings like T5 does
+        # Set encoder and decoder following Gemma2 pattern
+        # T5Gemma has encoder/decoder under model.model, not directly under model
+        self.set_encoder(spec.encoder, model.model.encoder, encoder_config)
+        self.set_decoder(spec.decoder, model.model.decoder, decoder_config)
+        
+        # Handle lm_head - in T5Gemma it has an out_proj wrapper (T5GemmaLMHead)
+        # Handle tied word embeddings like Gemma2 does
         if model.config.tie_word_embeddings:
             # When embeddings are tied, set projection to use decoder embeddings
             decoder_emb = spec.decoder.embeddings[0] if isinstance(spec.decoder.embeddings, list) else spec.decoder.embeddings
             spec.decoder.projection.weight = decoder_emb.weight
-            spec.decoder.scale_outputs = decoder_config.hidden_size ** -0.5
         else:
             # If not tied, set projection weights explicitly from lm_head
             lm_head = model.lm_head
             if hasattr(lm_head, 'out_proj'):
                 lm_head = lm_head.out_proj
             self.set_linear(spec.decoder.projection, lm_head)
+        
+        # Set embedding scaling like Gemma2
+        spec.decoder.embeddings.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
 
         return spec
 
@@ -1446,22 +1434,29 @@ class T5GemmaLoader(ModelLoader):
         spec.layer_norm_use_residual = True
 
     def set_encoder(
-        self, spec, encoder, encoder_config, rope_theta, sliding_window, layer_types
+        self, spec, encoder, encoder_config
     ):
         spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False
         self.set_embeddings(
             spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
             encoder.embed_tokens
         )
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
-        # Get head dimension for encoder
-        head_dim = getattr(encoder_config, "head_dim", 256)
-
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
-            # Set pre-attention layer norm (input_layer_norm)
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
+            # T5Gemma encoder follows Gemma2 pattern with pre+post layer norms
+            # Map T5Gemma naming to CTranslate2 spec naming:
+            # - pre_self_attn_layernorm -> input_layer_norm
+            # - post_self_attn_layernorm -> post_attention_layer_norm
+            # - pre_feedforward_layernorm -> pre_feedforward_layer_norm
+            # - post_feedforward_layernorm -> post_feedforward_layer_norm
             
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
+            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
+            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
+            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
+
             # Set attention weights
             wq = layer.self_attn.q_proj.weight
             wk = layer.self_attn.k_proj.weight
@@ -1471,41 +1466,43 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set post-attention layer norm
-            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
-
-            # Set pre-feedforward layer norm
-            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
-            
-            # Set FFN weights
+            # Set FFN weights (GeGLU activation)
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
             self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
-
-            # Set post-feedforward layer norm
-            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
 
             delattr(layer, "self_attn")
             delattr(layer, "mlp")
             gc.collect()
 
     def set_decoder(
-        self, spec, decoder, decoder_config, rope_theta, sliding_window, layer_types
+        self, spec, decoder, decoder_config
     ):
         spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False
         self.set_embeddings(
             spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings,
             decoder.embed_tokens
         )
         self.set_layer_norm(spec.layer_norm, decoder.norm)
 
-        # Get head dimension for decoder
-        head_dim = getattr(decoder_config, "head_dim", 256)
-
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
-            # Set pre-self-attention layer norm (input_layer_norm)
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
+            # T5Gemma decoder follows Gemma2 pattern with pre+post layer norms
+            # Map T5Gemma naming to CTranslate2 spec naming:
+            # - pre_self_attn_layernorm -> input_layer_norm
+            # - post_self_attn_layernorm -> post_attention_layer_norm
+            # - pre_cross_attn_layernorm -> attention.layer_norm
+            # - post_cross_attn_layernorm -> post_cross_attention_layer_norm
+            # - pre_feedforward_layernorm -> pre_feedforward_layer_norm
+            # - post_feedforward_layernorm -> post_feedforward_layer_norm
             
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
+            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
+            self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
+            self.set_layer_norm(layer_spec.post_cross_attention_layer_norm, layer.post_cross_attn_layernorm)
+            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
+            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
+
             # Set self-attention weights
             wq = layer.self_attn.q_proj.weight
             wk = layer.self_attn.k_proj.weight
@@ -1515,12 +1512,6 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set post-self-attention layer norm
-            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
-
-            # Set cross-attention pre-norm (cross-attention.layer_norm is still used for pre-norm)
-            self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
-            
             # Set cross-attention weights
             wq_cross = layer.cross_attn.q_proj.weight
             wk_cross = layer.cross_attn.k_proj.weight
@@ -1531,19 +1522,10 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.attention.linear[1].weight = torch.cat([wk_cross, wv_cross])
             layer_spec.attention.linear[2].weight = wo_cross
 
-            # Set post-cross-attention layer norm
-            self.set_layer_norm(layer_spec.post_cross_attention_layer_norm, layer.post_cross_attn_layernorm)
-
-            # Set pre-feedforward layer norm
-            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
-            
-            # Set FFN weights
+            # Set FFN weights (GeGLU activation)
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
             self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
-
-            # Set post-feedforward layer norm
-            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
 
             delattr(layer, "self_attn")
             delattr(layer, "cross_attn")
