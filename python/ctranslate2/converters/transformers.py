@@ -1398,10 +1398,18 @@ class T5GemmaLoader(ModelLoader):
             decoder_layer_types,
         )
         # lm_head in T5Gemma has an out_proj wrapper (T5GemmaLMHead)
-        lm_head = model.lm_head
-        if hasattr(lm_head, 'out_proj'):
-            lm_head = lm_head.out_proj
-        self.set_linear(spec.decoder.projection, lm_head)
+        # Handle tied word embeddings like T5 does
+        if model.config.tie_word_embeddings:
+            # When embeddings are tied, set projection to use decoder embeddings
+            decoder_emb = spec.decoder.embeddings[0] if isinstance(spec.decoder.embeddings, list) else spec.decoder.embeddings
+            spec.decoder.projection.weight = decoder_emb.weight
+            spec.decoder.scale_outputs = decoder_config.hidden_size ** -0.5
+        else:
+            # If not tied, set projection weights explicitly from lm_head
+            lm_head = model.lm_head
+            if hasattr(lm_head, 'out_proj'):
+                lm_head = lm_head.out_proj
+            self.set_linear(spec.decoder.projection, lm_head)
 
         return spec
 
