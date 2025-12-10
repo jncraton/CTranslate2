@@ -241,12 +241,14 @@ namespace ctranslate2 {
                                 memory_padder,
                                 return_normalized_attention);
           
-          // Post-cross-attention layer norm + residual (if present)
+          // Post-cross-attention layer norm (if present)
           if (_post_cross_attention_layer_norm) {
             hidden = std::move(output);
             (*_post_cross_attention_layer_norm)(hidden, output);
+            ops::Add()(output, context, output);
+          } else {
+            ops::Add()(output, context, output);
           }
-          ops::Add()(output, context, output);
         }
 
         // Pre-FFN layer norm
