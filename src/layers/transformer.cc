@@ -70,6 +70,13 @@ namespace ctranslate2 {
                         num_heads,
                         /*self_attention=*/true,
                         pre_norm)))
+      , _input_layer_norm(build_optional_layer<LayerNorm>(model, scope + "/input_layer_norm"))
+      , _post_attention_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_attention_layer_norm"))
+      , _pre_feedforward_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/pre_feedforward_layer_norm"))
+      , _post_feedforward_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_feedforward_layer_norm"))
       , _ff(model, scope + "/ffn", pre_norm, activation_type) {
     }
 
@@ -79,6 +86,44 @@ namespace ctranslate2 {
                                              const Padder* padder,
                                              StorageView* position_bias) const {
       PROFILE("TransformerEncoderLayer");
+      
+      const DataType dtype = input.dtype();
+      const Device device = input.device();
+
+      const bool pre_post_layer_norm = _post_feedforward_layer_norm && _pre_feedforward_layer_norm;
+      if (pre_post_layer_norm) {
+        StorageView hidden(dtype, device);
+        StorageView context(dtype, device);
+        (*_input_layer_norm)(input, hidden);
+
+        if (_self_attention)
+          (*_self_attention)(hidden,
+                             hidden,
+                             lengths,
+                             context,
+                             nullptr,
+                             nullptr,
+                             nullptr,
+                             padder,
+                             padder,
+                             true,
+                             position_bias);
+
+        (*_post_attention_layer_norm)(context, output);
+        ops::Add()(output, input, output);
+
+        context = std::move(output);
+        (*_pre_feedforward_layer_norm)(context, output);
+        hidden = std::move(output);
+
+        _ff(hidden, output);
+
+        hidden = std::move(output);
+        (*_post_feedforward_layer_norm)(hidden, output);
+        ops::Add()(output, context, output);
+        return;
+      }
+
       StorageView context(input.dtype(), input.device());
       if (_self_attention)
         (*_self_attention)(input,

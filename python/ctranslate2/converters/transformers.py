@@ -1377,6 +1377,7 @@ class T5GemmaLoader(ModelLoader):
             ),
             ffn_glu=True,
             rms_norm=True,
+            pre_post_layer_norm=True,  # T5Gemma uses Gemma2-style pre+post layer norms
         )
 
         # Set encoder and decoder with their respective configurations
@@ -1458,8 +1459,8 @@ class T5GemmaLoader(ModelLoader):
         head_dim = getattr(encoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
-            # Set attention layer norm - T5Gemma has pre_self_attn_layernorm
-            self.set_layer_norm(layer_spec.self_attention.layer_norm, layer.pre_self_attn_layernorm)
+            # Set pre-attention layer norm (input_layer_norm)
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
             
             # Set attention weights
             wq = layer.self_attn.q_proj.weight
@@ -1470,13 +1471,19 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set FFN layer norm - T5Gemma has pre_feedforward_layernorm
-            self.set_layer_norm(layer_spec.ffn.layer_norm, layer.pre_feedforward_layernorm)
+            # Set post-attention layer norm
+            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
+
+            # Set pre-feedforward layer norm
+            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
             
             # Set FFN weights
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
             self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+
+            # Set post-feedforward layer norm
+            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
 
             delattr(layer, "self_attn")
             delattr(layer, "mlp")
@@ -1496,8 +1503,8 @@ class T5GemmaLoader(ModelLoader):
         head_dim = getattr(decoder_config, "head_dim", 256)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
-            # Set self-attention layer norm - T5Gemma has pre_self_attn_layernorm
-            self.set_layer_norm(layer_spec.self_attention.layer_norm, layer.pre_self_attn_layernorm)
+            # Set pre-self-attention layer norm (input_layer_norm)
+            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
             
             # Set self-attention weights
             wq = layer.self_attn.q_proj.weight
@@ -1508,7 +1515,11 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.self_attention.linear[0].weight = torch.cat([wq, wk, wv])
             layer_spec.self_attention.linear[1].weight = wo
 
-            # Set cross-attention layer norm - T5Gemma has pre_cross_attn_layernorm
+            # Set post-self-attention layer norm
+            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
+
+            # Note: T5Gemma decoder layers don't have cross-attention post-norm, only pre-norm
+            # Set cross-attention layer norm - T5Gemma has pre_cross_attn_layernorm  
             self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
             
             # Set cross-attention weights
@@ -1521,13 +1532,16 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.attention.linear[1].weight = torch.cat([wk_cross, wv_cross])
             layer_spec.attention.linear[2].weight = wo_cross
 
-            # Set FFN layer norm - T5Gemma has pre_feedforward_layernorm
-            self.set_layer_norm(layer_spec.ffn.layer_norm, layer.pre_feedforward_layernorm)
+            # Set pre-feedforward layer norm
+            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
             
             # Set FFN weights
             self.set_linear(layer_spec.ffn.linear_0, layer.mlp.gate_proj)
             self.set_linear(layer_spec.ffn.linear_0_noact, layer.mlp.up_proj)
             self.set_linear(layer_spec.ffn.linear_1, layer.mlp.down_proj)
+
+            # Set post-feedforward layer norm
+            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
 
             delattr(layer, "self_attn")
             delattr(layer, "cross_attn")
