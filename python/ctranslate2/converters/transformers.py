@@ -1436,6 +1436,7 @@ class T5GemmaLoader(ModelLoader):
 
     def set_encoder(self, spec, encoder, encoder_config):
         spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False  # Gemma2-style embedding
         # Set Gemma2-style embedding scaling
         embeddings = (
             spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
@@ -1486,6 +1487,7 @@ class T5GemmaLoader(ModelLoader):
 
     def set_decoder(self, spec, decoder, decoder_config):
         spec.scale_embeddings = True
+        spec.start_from_zero_embedding = False  # Gemma2-style embedding
         # Set Gemma2-style embedding scaling
         embeddings = (
             spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
