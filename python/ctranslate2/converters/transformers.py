@@ -1384,6 +1384,8 @@ class T5GemmaLoader(ModelLoader):
                 else spec.decoder.embeddings
             )
             spec.decoder.projection.weight = decoder_emb.weight
+            # T5-style models require output scaling when embeddings are tied
+            spec.decoder.scale_outputs = decoder_config.hidden_size**-0.5
         else:
             # If not tied, set projection weights explicitly from lm_head
             lm_head = model.lm_head
