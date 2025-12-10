@@ -1353,15 +1353,6 @@ class T5GemmaLoader(ModelLoader):
             decoder_config, "hidden_activation", "gelu_pytorch_tanh"
         )
 
-        # Get RoPE and sliding window parameters separately for encoder and decoder
-        encoder_rope_theta = getattr(encoder_config, "rope_theta", 10000)
-        encoder_sliding_window = getattr(encoder_config, "sliding_window", 4096)
-        encoder_layer_types = getattr(encoder_config, "layer_types", None)
-
-        decoder_rope_theta = getattr(decoder_config, "rope_theta", 10000)
-        decoder_sliding_window = getattr(decoder_config, "sliding_window", 4096)
-        decoder_layer_types = getattr(decoder_config, "layer_types", None)
-
         # Create encoder-decoder spec with Gemma2 features
         # T5Gemma is based on Gemma2 architecture adapted for encoder-decoder
         spec = transformer_spec.TransformerSpec.from_config(
@@ -1382,22 +1373,28 @@ class T5GemmaLoader(ModelLoader):
         # T5Gemma has encoder/decoder under model.model, not directly under model
         self.set_encoder(spec.encoder, model.model.encoder, encoder_config)
         self.set_decoder(spec.decoder, model.model.decoder, decoder_config)
-        
+
         # Handle lm_head - in T5Gemma it has an out_proj wrapper (T5GemmaLMHead)
         # Handle tied word embeddings like Gemma2 does
         if model.config.tie_word_embeddings:
             # When embeddings are tied, set projection to use decoder embeddings
-            decoder_emb = spec.decoder.embeddings[0] if isinstance(spec.decoder.embeddings, list) else spec.decoder.embeddings
+            decoder_emb = (
+                spec.decoder.embeddings[0]
+                if isinstance(spec.decoder.embeddings, list)
+                else spec.decoder.embeddings
+            )
             spec.decoder.projection.weight = decoder_emb.weight
         else:
             # If not tied, set projection weights explicitly from lm_head
             lm_head = model.lm_head
-            if hasattr(lm_head, 'out_proj'):
+            if hasattr(lm_head, "out_proj"):
                 lm_head = lm_head.out_proj
             self.set_linear(spec.decoder.projection, lm_head)
-        
+
         # Set embedding scaling like Gemma2
-        spec.decoder.embeddings.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
+        spec.decoder.embeddings.multiply_by_sqrt_depth = (
+            decoder_config.hidden_size**0.5
+        )
 
         return spec
 
@@ -1421,7 +1418,10 @@ class T5GemmaLoader(ModelLoader):
         config.eos_token = tokenizer.eos_token
         config.unk_token = tokenizer.unk_token
         config.layer_norm_epsilon = model.config.decoder.rms_norm_eps
-        if hasattr(model.config, "decoder_start_token_id") and model.config.decoder_start_token_id is not None:
+        if (
+            hasattr(model.config, "decoder_start_token_id")
+            and model.config.decoder_start_token_id is not None
+        ):
             config.decoder_start_token = tokenizer.convert_ids_to_tokens(
                 model.config.decoder_start_token_id
             )
@@ -1432,15 +1432,15 @@ class T5GemmaLoader(ModelLoader):
         spec.gamma = layer_norm.weight
         spec.layer_norm_use_residual = True
 
-    def set_encoder(
-        self, spec, encoder, encoder_config
-    ):
+    def set_encoder(self, spec, encoder, encoder_config):
         spec.scale_embeddings = True
         # Set Gemma2-style embedding scaling
-        embeddings = spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        embeddings = (
+            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        )
         self.set_embeddings(embeddings, encoder.embed_tokens)
-        embeddings.multiply_by_sqrt_depth = encoder_config.hidden_size ** 0.5
-        
+        embeddings.multiply_by_sqrt_depth = encoder_config.hidden_size**0.5
+
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
@@ -1450,11 +1450,19 @@ class T5GemmaLoader(ModelLoader):
             # - post_self_attn_layernorm -> post_attention_layer_norm
             # - pre_feedforward_layernorm -> pre_feedforward_layer_norm
             # - post_feedforward_layernorm -> post_feedforward_layer_norm
-            
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
-            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
-            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
-            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
+
+            self.set_layer_norm(
+                layer_spec.input_layer_norm, layer.pre_self_attn_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
+            )
 
             # Set attention weights
             wq = layer.self_attn.q_proj.weight
@@ -1474,15 +1482,15 @@ class T5GemmaLoader(ModelLoader):
             delattr(layer, "mlp")
             gc.collect()
 
-    def set_decoder(
-        self, spec, decoder, decoder_config
-    ):
+    def set_decoder(self, spec, decoder, decoder_config):
         spec.scale_embeddings = True
         # Set Gemma2-style embedding scaling
-        embeddings = spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        embeddings = (
+            spec.embeddings[0] if isinstance(spec.embeddings, list) else spec.embeddings
+        )
         self.set_embeddings(embeddings, decoder.embed_tokens)
-        embeddings.multiply_by_sqrt_depth = decoder_config.hidden_size ** 0.5
-        
+        embeddings.multiply_by_sqrt_depth = decoder_config.hidden_size**0.5
+
         self.set_layer_norm(spec.layer_norm, decoder.norm)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, decoder.layers)):
@@ -1494,13 +1502,26 @@ class T5GemmaLoader(ModelLoader):
             # - post_cross_attn_layernorm -> post_cross_attention_layer_norm
             # - pre_feedforward_layernorm -> pre_feedforward_layer_norm
             # - post_feedforward_layernorm -> post_feedforward_layer_norm
-            
-            self.set_layer_norm(layer_spec.input_layer_norm, layer.pre_self_attn_layernorm)
-            self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
-            self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
-            self.set_layer_norm(layer_spec.post_cross_attention_layer_norm, layer.post_cross_attn_layernorm)
-            self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)
-            self.set_layer_norm(layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm)
+
+            self.set_layer_norm(
+                layer_spec.input_layer_norm, layer.pre_self_attn_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.post_cross_attention_layer_norm,
+                layer.post_cross_attn_layernorm,
+            )
+            self.set_layer_norm(
+                layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm
+            )
+            self.set_layer_norm(
+                layer_spec.post_feedforward_layer_norm, layer.post_feedforward_layernorm
+            )
 
             # Set self-attention weights
             wq = layer.self_attn.q_proj.weight
