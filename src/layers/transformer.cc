@@ -202,8 +202,11 @@ namespace ctranslate2 {
       if (pre_post_layer_norm) {
         StorageView hidden(dtype, device);
         StorageView context(dtype, device);
+        
+        // Pre-self-attention layer norm
         (*_input_layer_norm)(input, hidden);
 
+        // Self-attention
         if (_self_attention)
           (*_self_attention)(hidden,
                              hidden,
@@ -218,15 +221,35 @@ namespace ctranslate2 {
                              position_bias,
                              offset);
 
+        // Post-self-attention layer norm + residual
         (*_post_attention_layer_norm)(context, output);
         ops::Add()(output, input, output);
 
+        // Cross-attention (if present)
+        if (_encoder_attention) {
+          context = std::move(output);
+          (*_encoder_attention)(context,
+                                *memory,
+                                memory_lengths,
+                                output,
+                                cached_attn_keys,
+                                cached_attn_values,
+                                attention,
+                                input_padder,
+                                memory_padder,
+                                return_normalized_attention);
+          ops::Add()(output, context, output);
+        }
+
+        // Pre-FFN layer norm
         context = std::move(output);
         (*_pre_feedforward_layer_norm)(context, output);
         hidden = std::move(output);
 
+        // Feed-forward network
         _ff(hidden, output);
 
+        // Post-FFN layer norm + residual
         hidden = std::move(output);
         (*_post_feedforward_layer_norm)(hidden, output);
         ops::Add()(output, context, output);
