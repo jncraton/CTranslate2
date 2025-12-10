@@ -1518,8 +1518,7 @@ class T5GemmaLoader(ModelLoader):
             # Set post-self-attention layer norm
             self.set_layer_norm(layer_spec.post_attention_layer_norm, layer.post_self_attn_layernorm)
 
-            # Note: T5Gemma decoder layers don't have cross-attention post-norm, only pre-norm
-            # Set cross-attention layer norm - T5Gemma has pre_cross_attn_layernorm  
+            # Set cross-attention pre-norm (cross-attention.layer_norm is still used for pre-norm)
             self.set_layer_norm(layer_spec.attention.layer_norm, layer.pre_cross_attn_layernorm)
             
             # Set cross-attention weights
@@ -1531,6 +1530,9 @@ class T5GemmaLoader(ModelLoader):
             layer_spec.attention.linear[0].weight = wq_cross
             layer_spec.attention.linear[1].weight = torch.cat([wk_cross, wv_cross])
             layer_spec.attention.linear[2].weight = wo_cross
+
+            # Set post-cross-attention layer norm
+            self.set_layer_norm(layer_spec.post_cross_attention_layer_norm, layer.post_cross_attn_layernorm)
 
             # Set pre-feedforward layer norm
             self.set_layer_norm(layer_spec.pre_feedforward_layer_norm, layer.pre_feedforward_layernorm)

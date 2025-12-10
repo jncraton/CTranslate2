@@ -169,6 +169,8 @@ namespace ctranslate2 {
                                      model, scope + "/pre_feedforward_layer_norm"))
       , _post_feedforward_layer_norm(build_optional_layer<LayerNorm>(
                                      model, scope + "/post_feedforward_layer_norm"))
+      , _post_cross_attention_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_cross_attention_layer_norm"))
       , _encoder_attention(build_optional_layer<MultiHeadAttention>(model,
                                                                     scope + "/attention",
                                                                     num_heads,
@@ -238,6 +240,12 @@ namespace ctranslate2 {
                                 input_padder,
                                 memory_padder,
                                 return_normalized_attention);
+          
+          // Post-cross-attention layer norm + residual (if present)
+          if (_post_cross_attention_layer_norm) {
+            hidden = std::move(output);
+            (*_post_cross_attention_layer_norm)(hidden, output);
+          }
           ops::Add()(output, context, output);
         }
 

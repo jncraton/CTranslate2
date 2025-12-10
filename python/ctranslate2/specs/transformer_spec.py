@@ -352,6 +352,10 @@ class TransformerDecoderLayerSpec(model_spec.LayerSpec):
             self.post_attention_layer_norm = common_spec.LayerNormSpec(
                 rms_norm=rms_norm
             )
+            if with_encoder_attention:
+                self.post_cross_attention_layer_norm = common_spec.LayerNormSpec(
+                    rms_norm=rms_norm
+                )
             self.pre_feedforward_layer_norm = common_spec.LayerNormSpec(
                 rms_norm=rms_norm
             )
