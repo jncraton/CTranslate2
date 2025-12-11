@@ -1355,19 +1355,44 @@ class T5GemmaLoader(ModelLoader):
 
         # Create encoder-decoder spec with Gemma2 features
         # T5Gemma is based on Gemma2 architecture adapted for encoder-decoder
-        spec = transformer_spec.TransformerSpec.from_config(
-            (encoder_config.num_hidden_layers, decoder_config.num_hidden_layers),
+        # Note: We can't use TransformerSpec.from_config for RoPE, so we create specs manually
+        
+        activation = (
+            common_spec.Activation.GELU
+            if activation_config == "gelu"
+            else common_spec.Activation.GELUTanh
+        )
+        
+        # Create encoder spec (T5Gemma encoder doesn't use RoPE)
+        encoder_spec = transformer_spec.TransformerEncoderSpec(
+            encoder_config.num_hidden_layers,
             num_heads_enc,
             pre_norm=True,
-            activation=(
-                common_spec.Activation.GELU
-                if activation_config == "gelu"
-                else common_spec.Activation.GELUTanh
-            ),
+            activation=activation,
             ffn_glu=True,
             rms_norm=True,
-            pre_post_layer_norm=True,  # Enable Gemma2-style pre+post layer norms
+            pre_post_layer_norm=True,
         )
+        
+        # Create decoder spec with RoPE (T5Gemma decoder uses RoPE)
+        decoder_spec = transformer_spec.TransformerDecoderSpec(
+            decoder_config.num_hidden_layers,
+            num_heads_dec,
+            pre_norm=True,
+            activation=activation,
+            with_encoder_attention=True,
+            ffn_glu=True,
+            rms_norm=True,
+            pre_post_layer_norm=True,
+            rotary_dim=0,  # Apply RoPE to all dimensions
+            rotary_interleave=False,  # Gemma2-style RoPE (not interleaved)
+            rotary_base=getattr(decoder_config, "rope_theta", 10000),
+            num_heads_kv=num_heads_kv_dec,
+            head_dim=head_dim_dec,
+        )
+        
+        # Create full transformer spec
+        spec = transformer_spec.TransformerSpec(encoder_spec, decoder_spec)
 
         # Set encoder and decoder following Gemma2 pattern
         # T5Gemma has encoder/decoder under model.model, not directly under model
