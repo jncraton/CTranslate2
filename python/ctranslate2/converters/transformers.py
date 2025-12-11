@@ -1347,6 +1347,9 @@ class T5GemmaLoader(ModelLoader):
         num_heads_kv_dec = getattr(decoder_config, "num_key_value_heads", num_heads_dec)
         if num_heads_kv_dec == num_heads_dec:
             num_heads_kv_dec = None
+        
+        # Extract head dimension for decoder (needed for RoPE)
+        head_dim_dec = getattr(decoder_config, "head_dim", decoder_config.hidden_size // num_heads_dec)
 
         # Get activation function
         activation_config = getattr(
