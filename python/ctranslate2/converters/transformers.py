@@ -1338,18 +1338,30 @@ class T5GemmaLoader(ModelLoader):
 
         # Extract attention head configuration for encoder
         num_heads_enc = encoder_config.num_attention_heads
-        num_heads_kv_enc = getattr(encoder_config, "num_key_value_heads", num_heads_enc)
+        num_heads_kv_enc = getattr(
+            encoder_config,
+            "num_key_value_heads",
+            num_heads_enc,
+        )
         if num_heads_kv_enc == num_heads_enc:
             num_heads_kv_enc = None
 
         # Extract attention head configuration for decoder
         num_heads_dec = decoder_config.num_attention_heads
-        num_heads_kv_dec = getattr(decoder_config, "num_key_value_heads", num_heads_dec)
+        num_heads_kv_dec = getattr(
+            decoder_config,
+            "num_key_value_heads",
+            num_heads_dec,
+        )
         if num_heads_kv_dec == num_heads_dec:
             num_heads_kv_dec = None
-        
+
         # Extract head dimension for decoder (needed for RoPE)
-        head_dim_dec = getattr(decoder_config, "head_dim", decoder_config.hidden_size // num_heads_dec)
+        head_dim_dec = getattr(
+            decoder_config,
+            "head_dim",
+            decoder_config.hidden_size // num_heads_dec,
+        )
 
         # Get activation function
         activation_config = getattr(
@@ -1357,15 +1369,16 @@ class T5GemmaLoader(ModelLoader):
         )
 
         # Create encoder-decoder spec with Gemma2 features
-        # T5Gemma is based on Gemma2 architecture adapted for encoder-decoder
-        # Note: We can't use TransformerSpec.from_config for RoPE, so we create specs manually
-        
+        # T5Gemma is based on Gemma2 architecture adapted for
+        # encoder-decoder. Note: We can't use TransformerSpec.from_config
+        # for RoPE, so we create specs manually
+
         activation = (
             common_spec.Activation.GELU
             if activation_config == "gelu"
             else common_spec.Activation.GELUTanh
         )
-        
+
         # Create encoder spec (T5Gemma encoder doesn't use RoPE)
         encoder_spec = transformer_spec.TransformerEncoderSpec(
             encoder_config.num_hidden_layers,
@@ -1376,7 +1389,7 @@ class T5GemmaLoader(ModelLoader):
             rms_norm=True,
             pre_post_layer_norm=True,
         )
-        
+
         # Create decoder spec with RoPE (T5Gemma decoder uses RoPE)
         decoder_spec = transformer_spec.TransformerDecoderSpec(
             decoder_config.num_hidden_layers,
@@ -1388,24 +1401,26 @@ class T5GemmaLoader(ModelLoader):
             rms_norm=True,
             pre_post_layer_norm=True,
             rotary_dim=0,  # Apply RoPE to all dimensions
-            rotary_interleave=False,  # Gemma2-style RoPE (not interleaved)
+            rotary_interleave=False,  # Gemma2-style RoPE
             rotary_base=getattr(decoder_config, "rope_theta", 10000),
             num_heads_kv=num_heads_kv_dec,
             head_dim=head_dim_dec,
         )
-        
+
         # Create full transformer spec
         spec = transformer_spec.TransformerSpec(encoder_spec, decoder_spec)
 
         # Set encoder and decoder following Gemma2 pattern
-        # T5Gemma has encoder/decoder under model.model, not directly under model
+        # T5Gemma has encoder/decoder under model.model, not directly
+        # under model
         self.set_encoder(spec.encoder, model.model.encoder, encoder_config)
         self.set_decoder(spec.decoder, model.model.decoder, decoder_config)
 
-        # Handle lm_head - in T5Gemma it has an out_proj wrapper (T5GemmaLMHead)
-        # Handle tied word embeddings like Gemma2 does
+        # Handle lm_head - in T5Gemma it has an out_proj wrapper
+        # (T5GemmaLMHead). Handle tied word embeddings like Gemma2
         if model.config.tie_word_embeddings:
-            # When embeddings are tied, set projection to use decoder embeddings
+            # When embeddings are tied, set projection to use decoder
+            # embeddings
             decoder_emb = (
                 spec.decoder.embeddings[0]
                 if isinstance(spec.decoder.embeddings, list)
