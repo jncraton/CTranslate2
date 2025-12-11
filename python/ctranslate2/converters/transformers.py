@@ -1438,6 +1438,7 @@ class T5GemmaLoader(ModelLoader):
         self.set_embeddings(embeddings, encoder.embed_tokens)
         embeddings.multiply_by_sqrt_depth = encoder_config.hidden_size**0.5
 
+        # T5Gemma encoder has a final layer norm
         self.set_layer_norm(spec.layer_norm, encoder.norm)
 
         for i, (layer_spec, layer) in enumerate(zip(spec.layer, encoder.layers)):
