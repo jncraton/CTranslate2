@@ -1393,11 +1393,6 @@ class T5GemmaLoader(ModelLoader):
                 lm_head = lm_head.out_proj
             self.set_linear(spec.decoder.projection, lm_head)
 
-        # Set embedding scaling like Gemma2
-        spec.decoder.embeddings.multiply_by_sqrt_depth = (
-            decoder_config.hidden_size**0.5
-        )
-
         return spec
 
     def get_vocabulary(self, model, tokenizer):
