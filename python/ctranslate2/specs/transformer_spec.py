@@ -23,6 +23,16 @@ class TransformerEncoderSpec(model_spec.LayerSpec):
         ffn_glu: bool = False,
         rms_norm: bool = False,
         multi_query_attention: bool = False,
+        pre_post_layer_norm: bool = False,
+        rotary_dim: Optional[int] = None,
+        rotary_interleave: bool = True,
+        rotary_scaling_type: Optional[attention_spec.RotaryScalingType] = None,
+        rotary_scaling_factor: float = 1,
+        rotary_base: float = 10000,
+        original_max_position_embeddings: int = 0,
+        max_position_embeddings: int = 0,
+        num_heads_kv: Optional[int] = None,
+        head_dim: Optional[int] = None,
     ):
         """Initializes a Transformer encoder specification.
 
@@ -44,6 +54,19 @@ class TransformerEncoderSpec(model_spec.LayerSpec):
             https://arxiv.org/abs/2002.05202.
           rms_norm: Use the root mean square layer normalization.
           multi_query_attention: Use multi-query attention.
+          pre_post_layer_norm: Add post layer norm for each pre norm layer.
+          rotary_dim: Apply rotary embeddings to these first N dimensions. If 0, rotary
+            embeddings are applied to all dimensions.
+          rotary_interleave: Interleave the head dimensions when rotary embeddings are applied.
+            Otherwise the head dimensions are sliced in half.
+          rotary_scaling_type: Type of RoPE scaling.
+          rotary_scaling_factor: Factor used in the RoPE scaling.
+          rotary_base: The base period of the rotary embeddings.
+          original_max_position_embeddings: The original max position embeddings
+            for Su rope embeddings.
+          max_position_embeddings: The max position embeddings for Su rope embeddings.
+          num_heads_kv: Number of key/value heads for grouped-query attention.
+          head_dim: Dimension of each attention head.
         """
         self.multi_query_attention = multi_query_attention
         self.num_heads = np.dtype("int16").type(num_heads)
@@ -54,7 +77,7 @@ class TransformerEncoderSpec(model_spec.LayerSpec):
             common_spec.EmbeddingsSpec() for _ in range(num_source_embeddings)
         ]
         self.scale_embeddings = True
-        if not relative_position and not relative_attention_bias:
+        if not relative_position and not relative_attention_bias and rotary_dim is None:
             self.position_encodings = PositionEncoderSpec()
         if pre_norm and not no_final_norm:
             self.layer_norm = common_spec.LayerNormSpec(rms_norm=rms_norm)
@@ -66,7 +89,20 @@ class TransformerEncoderSpec(model_spec.LayerSpec):
                 relative_attention_bias=relative_attention_bias,
                 ffn_glu=ffn_glu,
                 rms_norm=rms_norm,
-                num_heads_kv=1 if multi_query_attention else None,
+                num_heads_kv=(
+                    num_heads_kv
+                    if num_heads_kv is not None
+                    else (1 if multi_query_attention else None)
+                ),
+                pre_post_layer_norm=pre_post_layer_norm,
+                rotary_dim=rotary_dim,
+                rotary_interleave=rotary_interleave,
+                rotary_scaling_type=rotary_scaling_type,
+                rotary_scaling_factor=rotary_scaling_factor,
+                rotary_base=rotary_base,
+                original_max_position_embeddings=original_max_position_embeddings,
+                max_position_embeddings=max_position_embeddings,
+                head_dim=head_dim,
             )
             for _ in range(num_layers)
         ]
@@ -255,6 +291,15 @@ class TransformerEncoderLayerSpec(model_spec.LayerSpec):
         rms_norm=False,
         num_heads_kv=None,
         sliding_window=None,
+        pre_post_layer_norm=False,
+        rotary_dim=None,
+        rotary_interleave=True,
+        rotary_scaling_type=None,
+        rotary_scaling_factor=1,
+        rotary_base=10000,
+        original_max_position_embeddings=0,
+        max_position_embeddings=0,
+        head_dim=None,
     ):
         self.self_attention = attention_spec.MultiHeadAttentionSpec(
             self_attention=True,
@@ -263,8 +308,31 @@ class TransformerEncoderLayerSpec(model_spec.LayerSpec):
             rms_norm=rms_norm,
             num_heads_kv=num_heads_kv,
             sliding_window=sliding_window,
+            rotary_dim=rotary_dim,
+            rotary_interleave=rotary_interleave,
+            rotary_scaling_type=rotary_scaling_type,
+            rotary_scaling_factor=rotary_scaling_factor,
+            rotary_base=rotary_base,
+            original_max_position_embeddings=original_max_position_embeddings,
+            max_position_embeddings=max_position_embeddings,
+            head_dim=head_dim,
         )
         self.ffn = FeedForwardSpec(glu=ffn_glu, rms_norm=rms_norm)
+
+        if pre_post_layer_norm:
+            self.input_layer_norm = common_spec.LayerNormSpec(rms_norm=rms_norm)
+            self.post_attention_layer_norm = common_spec.LayerNormSpec(
+                rms_norm=rms_norm
+            )
+            self.pre_feedforward_layer_norm = common_spec.LayerNormSpec(
+                rms_norm=rms_norm
+            )
+            self.post_feedforward_layer_norm = common_spec.LayerNormSpec(
+                rms_norm=rms_norm
+            )
+
+            delattr(self.self_attention, "layer_norm")
+            delattr(self.ffn, "layer_norm")
 
 
 class TransformerDecoderLayerSpec(model_spec.LayerSpec):
@@ -333,6 +401,10 @@ class TransformerDecoderLayerSpec(model_spec.LayerSpec):
             self.post_attention_layer_norm = common_spec.LayerNormSpec(
                 rms_norm=rms_norm
             )
+            if with_encoder_attention:
+                self.post_cross_attention_layer_norm = common_spec.LayerNormSpec(
+                    rms_norm=rms_norm
+                )
             self.pre_feedforward_layer_norm = common_spec.LayerNormSpec(
                 rms_norm=rms_norm
             )
@@ -417,6 +489,7 @@ class TransformerSpec(model_spec.SequenceToSequenceModelSpec):
         ffn_glu: bool = False,
         rms_norm: bool = False,
         multi_query_attention: bool = False,
+        pre_post_layer_norm: bool = False,
     ):
         """Creates a Transformer model specification.
 
@@ -441,6 +514,7 @@ class TransformerSpec(model_spec.SequenceToSequenceModelSpec):
             https://arxiv.org/abs/2002.05202.
           rms_norm: Use the root mean square layer normalization.
           multi_query_attention: Use multi-query attention.
+          pre_post_layer_norm: Add post layer norm for each pre norm layer.
         """
         if isinstance(num_layers, (list, tuple)):
             num_encoder_layers, num_decoder_layers = num_layers
@@ -461,6 +535,7 @@ class TransformerSpec(model_spec.SequenceToSequenceModelSpec):
             ffn_glu=ffn_glu,
             rms_norm=rms_norm,
             multi_query_attention=multi_query_attention,
+            pre_post_layer_norm=pre_post_layer_norm,
         )
 
         decoder = TransformerDecoderSpec(
@@ -477,6 +552,7 @@ class TransformerSpec(model_spec.SequenceToSequenceModelSpec):
             ffn_glu=ffn_glu,
             rms_norm=rms_norm,
             multi_query_attention=multi_query_attention,
+            pre_post_layer_norm=pre_post_layer_norm,
         )
 
         return cls(encoder, decoder)
