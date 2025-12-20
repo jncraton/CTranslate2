@@ -1394,7 +1394,7 @@ class T5GemmaLoader(ModelLoader):
             ffn_glu=True,
             rms_norm=True,
             pre_post_layer_norm=True,
-            rotary_dim=0,  # Apply RoPE to all dimensions
+            rotary_dim=head_dim_enc,  # Apply RoPE to full head dimensions
             rotary_interleave=False,  # Gemma2-style RoPE
             rotary_base=getattr(encoder_config, "rope_theta", 10000),
             num_heads_kv=num_heads_kv_enc,
@@ -1411,7 +1411,7 @@ class T5GemmaLoader(ModelLoader):
             ffn_glu=True,
             rms_norm=True,
             pre_post_layer_norm=True,
-            rotary_dim=0,  # Apply RoPE to all dimensions
+            rotary_dim=head_dim_dec,  # Apply RoPE to full head dimensions
             rotary_interleave=False,  # Gemma2-style RoPE
             rotary_base=getattr(decoder_config, "rope_theta", 10000),
             num_heads_kv=num_heads_kv_dec,
