@@ -70,6 +70,13 @@ namespace ctranslate2 {
                         num_heads,
                         /*self_attention=*/true,
                         pre_norm)))
+      , _input_layer_norm(build_optional_layer<LayerNorm>(model, scope + "/input_layer_norm"))
+      , _post_attention_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_attention_layer_norm"))
+      , _pre_feedforward_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/pre_feedforward_layer_norm"))
+      , _post_feedforward_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_feedforward_layer_norm"))
       , _ff(model, scope + "/ffn", pre_norm, activation_type) {
     }
 
@@ -79,6 +86,44 @@ namespace ctranslate2 {
                                              const Padder* padder,
                                              StorageView* position_bias) const {
       PROFILE("TransformerEncoderLayer");
+      
+      const DataType dtype = input.dtype();
+      const Device device = input.device();
+
+      const bool pre_post_layer_norm = _post_feedforward_layer_norm && _pre_feedforward_layer_norm;
+      if (pre_post_layer_norm) {
+        StorageView hidden(dtype, device);
+        StorageView context(dtype, device);
+        (*_input_layer_norm)(input, hidden);
+
+        if (_self_attention)
+          (*_self_attention)(hidden,
+                             hidden,
+                             lengths,
+                             context,
+                             nullptr,
+                             nullptr,
+                             nullptr,
+                             padder,
+                             padder,
+                             true,
+                             position_bias);
+
+        (*_post_attention_layer_norm)(context, output);
+        ops::Add()(output, input, output);
+
+        context = std::move(output);
+        (*_pre_feedforward_layer_norm)(context, output);
+        hidden = std::move(output);
+
+        _ff(hidden, output);
+
+        hidden = std::move(output);
+        (*_post_feedforward_layer_norm)(hidden, output);
+        ops::Add()(output, context, output);
+        return;
+      }
+
       StorageView context(input.dtype(), input.device());
       if (_self_attention)
         (*_self_attention)(input,
@@ -124,6 +169,10 @@ namespace ctranslate2 {
                                      model, scope + "/pre_feedforward_layer_norm"))
       , _post_feedforward_layer_norm(build_optional_layer<LayerNorm>(
                                      model, scope + "/post_feedforward_layer_norm"))
+      , _pre_cross_attention_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/attention/layer_norm"))
+      , _post_cross_attention_layer_norm(build_optional_layer<LayerNorm>(
+                                     model, scope + "/post_cross_attention_layer_norm"))
       , _encoder_attention(build_optional_layer<MultiHeadAttention>(model,
                                                                     scope + "/attention",
                                                                     num_heads,
@@ -175,6 +224,39 @@ namespace ctranslate2 {
 
         (*_post_attention_layer_norm)(context, output);
         ops::Add()(output, input, output);
+
+        // Cross-attention (if present)
+        if (_encoder_attention) {
+          context = std::move(output);
+          
+          // Pre-cross-attention layer norm
+          if (_pre_cross_attention_layer_norm) {
+            (*_pre_cross_attention_layer_norm)(context, hidden);
+          } else {
+            hidden = std::move(context);
+            context = std::move(output);
+          }
+          
+          (*_encoder_attention)(hidden,
+                                *memory,
+                                memory_lengths,
+                                output,
+                                cached_attn_keys,
+                                cached_attn_values,
+                                attention,
+                                input_padder,
+                                memory_padder,
+                                return_normalized_attention);
+          
+          // Post-cross-attention layer norm + residual
+          if (_post_cross_attention_layer_norm) {
+            hidden = std::move(output);
+            (*_post_cross_attention_layer_norm)(hidden, output);
+          }
+
+          // Combine layer cross-attention with residual
+          ops::Add()(output, context, output);
+        }
 
         context = std::move(output);
         (*_pre_feedforward_layer_norm)(context, output);
