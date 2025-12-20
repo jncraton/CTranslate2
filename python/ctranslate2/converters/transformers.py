@@ -1346,6 +1346,13 @@ class T5GemmaLoader(ModelLoader):
         if num_heads_kv_enc == num_heads_enc:
             num_heads_kv_enc = None
 
+        # Extract head dimension for encoder (needed for RoPE)
+        head_dim_enc = getattr(
+            encoder_config,
+            "head_dim",
+            encoder_config.hidden_size // num_heads_enc,
+        )
+
         # Extract attention head configuration for decoder
         num_heads_dec = decoder_config.num_attention_heads
         num_heads_kv_dec = getattr(
@@ -1379,7 +1386,7 @@ class T5GemmaLoader(ModelLoader):
             else common_spec.Activation.GELUTanh
         )
 
-        # Create encoder spec (T5Gemma encoder doesn't use RoPE)
+        # Create encoder spec with RoPE (T5Gemma encoder uses RoPE)
         encoder_spec = transformer_spec.TransformerEncoderSpec(
             encoder_config.num_hidden_layers,
             num_heads_enc,
@@ -1388,6 +1395,11 @@ class T5GemmaLoader(ModelLoader):
             ffn_glu=True,
             rms_norm=True,
             pre_post_layer_norm=True,
+            rotary_dim=0,  # Apply RoPE to all dimensions
+            rotary_interleave=False,  # Gemma2-style RoPE
+            rotary_base=getattr(encoder_config, "rope_theta", 10000),
+            num_heads_kv=num_heads_kv_enc,
+            head_dim=head_dim_enc,
         )
 
         # Create decoder spec with RoPE (T5Gemma decoder uses RoPE)
