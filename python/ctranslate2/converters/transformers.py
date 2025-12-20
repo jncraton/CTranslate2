@@ -1375,6 +1375,29 @@ class T5GemmaLoader(ModelLoader):
             decoder_config, "hidden_activation", "gelu_pytorch_tanh"
         )
 
+        # Extract RoPE theta for encoder
+        # T5Gemma/Gemma2 store rope_theta in rope_parameters dict
+        encoder_rope_theta = 10000  # default
+        if hasattr(encoder_config, "rope_parameters") and encoder_config.rope_parameters:
+            if isinstance(encoder_config.rope_parameters, dict):
+                encoder_rope_theta = encoder_config.rope_parameters.get("rope_theta", 10000)
+            else:
+                encoder_rope_theta = getattr(encoder_config.rope_parameters, "rope_theta", 10000)
+        else:
+            # Fallback to direct attribute
+            encoder_rope_theta = getattr(encoder_config, "rope_theta", 10000)
+
+        # Extract RoPE theta for decoder
+        decoder_rope_theta = 10000  # default
+        if hasattr(decoder_config, "rope_parameters") and decoder_config.rope_parameters:
+            if isinstance(decoder_config.rope_parameters, dict):
+                decoder_rope_theta = decoder_config.rope_parameters.get("rope_theta", 10000)
+            else:
+                decoder_rope_theta = getattr(decoder_config.rope_parameters, "rope_theta", 10000)
+        else:
+            # Fallback to direct attribute
+            decoder_rope_theta = getattr(decoder_config, "rope_theta", 10000)
+
         # Create encoder-decoder spec with Gemma2 features
         # T5Gemma is based on Gemma2 architecture adapted for
         # encoder-decoder
@@ -1396,7 +1419,7 @@ class T5GemmaLoader(ModelLoader):
             pre_post_layer_norm=True,
             rotary_dim=0,  # Apply RoPE to all dimensions
             rotary_interleave=False,  # Gemma2-style RoPE
-            rotary_base=getattr(encoder_config, "rope_theta", 10000),
+            rotary_base=encoder_rope_theta,
             num_heads_kv=num_heads_kv_enc,
             head_dim=head_dim_enc,
         )
@@ -1413,7 +1436,7 @@ class T5GemmaLoader(ModelLoader):
             pre_post_layer_norm=True,
             rotary_dim=0,  # Apply RoPE to all dimensions
             rotary_interleave=False,  # Gemma2-style RoPE
-            rotary_base=getattr(decoder_config, "rope_theta", 10000),
+            rotary_base=decoder_rope_theta,
             num_heads_kv=num_heads_kv_dec,
             head_dim=head_dim_dec,
         )
